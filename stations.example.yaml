@@ -13,7 +13,7 @@ stations:
   - name: Radio Nowy Świat
     id: rns
     url: https://stream.rcs.revma.com/ypqt40u0x1zuv
-    logo: https://nowyswiat.online/assets/images/mid.jpg
+    logo: https://nowyswiat.online/assets/favicons/android-icon-192x192.png
   # Your own links, e.g. a personal patron stream:
   # - name: My stream
   #   url: https://...
