@@ -28,6 +28,9 @@ any DLNA renderer that browses media servers.
   Either can be forced per station.
 - Reconnects when the source drops, for as long as a speaker listens. ffmpeg
   only runs while someone is listening.
+- A status page, `/status.json`, with what each speaker is playing: station,
+  stream URL, the source format (codec, profile, bitrate, sample rate,
+  channels) and whether it is transcoded. Handy for Home Assistant sensors.
 - SSDP discovery and announcements, ContentDirectory and ConnectionManager.
   Stable IDs, so favourites keep working after restarts.
 - Small: Python, aiohttp and ffmpeg on Alpine, about 30 MB of RAM. Images for
@@ -91,6 +94,38 @@ stations:
 | `DLNA_RADIO_FOLDER` | `Stacje` | Name of the folder with the stations |
 | `DLNA_RADIO_DEBUG` | | `1` logs every request |
 
+## Status for Home Assistant
+
+`http://<server-ip>:8357/status.json` lists the speakers listening right now,
+keyed by IP:
+
+```json
+{"server": "Radio", "players": {"192.168.1.20": {
+  "station": "Radio 357 (AAC)", "id": "r357-aac", "url": "https://stream.radio357.pl/?s=web",
+  "source": {"codec": "aac", "profile": "HE-AAC", "bitrate": 128, "sample_rate": 44100,
+             "channels": 2, "channel_layout": "stereo", "icy_name": "Radio 357",
+             "icy_genre": null, "summary": "HE-AAC 128 kb/s 44.1 kHz stereo"},
+  "transcoded": true, "output": {"codec": "mp3", "mime": "audio/mpeg", "bitrate": 256},
+  "since": "2026-11-14T13:47:08+0000"}}}
+```
+
+`bitrate` is in kbit/s: the station's `icy-br` header, or ffprobe's estimate.
+A REST sensor in Home Assistant:
+
+```yaml
+rest:
+  - resource: http://192.168.1.10:8357/status.json
+    scan_interval: 15
+    sensor:
+      - name: DLNA Radio
+        value_template: "{{ value_json.players | count }}"
+        json_attributes: [players]
+```
+
+Then e.g. `state_attr('sensor.dlna_radio', 'players')['192.168.1.20'].source.summary`
+in a template sensor per speaker. The status includes the stream URLs, so
+personal links are visible to anyone who can reach the server.
+
 ## Notes and limitations
 
 - **Now playing.** MusicCast reads an item's title, artist and cover once, when
@@ -127,6 +162,9 @@ głośnik z Home Assistanta.
   `network_mode: host`.
 - Na głośniku: wejście **Server** → **Radio** → **Stacje** → stacja, a w trakcie
   grania zapis w ulubionych.
+- `http://<ip-serwera>:8357/status.json` pokazuje, co gra który głośnik: stację,
+  adres strumienia, format źródła (kodek, bitrate, częstotliwość, kanały) i czy
+  jest transkodowany. Przydaje się do sensorów w Home Assistant.
 - Głośnik pokazuje nazwę stacji, a nie aktualny utwór. MusicCast czyta opis raz,
   przy starcie, i ignoruje metadane ICY.
 - Strona nie ma hasła, więc nie wystawiaj jej do internetu. Osobiste linki

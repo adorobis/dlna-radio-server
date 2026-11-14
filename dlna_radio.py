@@ -29,6 +29,9 @@ Stations file:
 
 The file is re-read when it changes; no restart is needed. Stations can also
 be added and removed on the server's web page (http://<ip>:<port>/).
+
+http://<ip>:<port>/status.json lists the players listening right now (keyed by
+IP) with the station, its URL and the format of the source and the output.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import asyncio
 import contextlib
 from email.utils import formatdate
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -62,7 +66,7 @@ BITRATE = os.environ.get("DLNA_RADIO_BITRATE", "256k")
 SSDP_GROUP = "239.255.255.250"
 SSDP_PORT = 1900
 MAX_AGE = 1800
-SERVER = "Linux UPnP/1.0 dlna-radio/1.0"
+SERVER = "Linux UPnP/1.0 dlna-radio/1.1"
 CHUNK = 64 * 1024
 MAX_FAILURES = 6
 CODEC_TTL = 6 * 3600
@@ -167,6 +171,8 @@ def station_id(name: str) -> str:
 
 
 STATIONS = Stations()
+# Player IP -> what it is listening to (served at /status.json).
+LISTENERS: dict[str, dict[str, Any]] = {}
 _tasks: set[asyncio.Task] = set()
 
 
@@ -177,17 +183,23 @@ def background(coro: Any) -> None:
     task.add_done_callback(_tasks.discard)
 
 
-_codecs: dict[str, tuple[str | None, float]] = {}
+_probes: dict[str, tuple[dict[str, Any], float]] = {}
 
 
-async def codec_of(url: str) -> str | None:
-    """Return the audio codec of a stream (cached), None if unknown."""
-    cached = _codecs.get(url)
+async def probe(url: str) -> dict[str, Any]:
+    """Return the audio format of a stream (cached), {} if unknown.
+
+    Keys: codec, profile, sample_rate, channels, channel_layout, bitrate
+    (kbit/s, from icy-br or estimated by ffprobe), icy_name, icy_genre.
+    """
+    cached = _probes.get(url)
     if cached and time.monotonic() - cached[1] < CODEC_TTL:
         return cached[0]
     proc = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "error", "-rw_timeout", "15000000",
-        "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", url,
+        "ffprobe", "-v", "error", "-rw_timeout", "15000000", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name,profile,sample_rate,channels,channel_layout,bit_rate"
+        ":format=bit_rate:format_tags=icy-br,icy-name,icy-genre",
+        "-of", "json", url,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
     )  # fmt: skip
     try:
@@ -195,11 +207,58 @@ async def codec_of(url: str) -> str | None:
     except TimeoutError:
         proc.kill()
         await proc.wait()
+        return {}
+    try:
+        data = json.loads(out or b"{}")
+    except ValueError:
+        return {}
+    streams = data.get("streams") or [{}]
+    audio, fmt = streams[0], data.get("format") or {}
+    tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
+    if not audio.get("codec_name"):
+        return {}
+    bitrate = _int(str(tags.get("icy-br", "")).split(",")[0])
+    if not bitrate and (bps := _int(audio.get("bit_rate")) or _int(fmt.get("bit_rate"))):
+        bitrate = round(bps / 1000)
+    info = {
+        "codec": audio["codec_name"],
+        "profile": audio.get("profile"),
+        "sample_rate": _int(audio.get("sample_rate")),
+        "channels": audio.get("channels"),
+        "channel_layout": audio.get("channel_layout"),
+        "bitrate": bitrate,
+        "icy_name": tags.get("icy-name") or None,
+        "icy_genre": tags.get("icy-genre") or None,
+    }
+    _probes[url] = (info, time.monotonic())
+    return info
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
-    codec = out.decode().strip().splitlines()[0] if out.strip() else None
-    if codec:
-        _codecs[url] = (codec, time.monotonic())
-    return codec
+
+
+def describe(info: dict[str, Any]) -> str:
+    """Return a short description of a probed format, e.g. 'HE-AAC 128 kb/s 44.1 kHz stereo'."""
+    if not info.get("codec"):
+        return ""
+    profile = info.get("profile")
+    parts = [profile if profile and profile.upper() != "LC" else info["codec"].upper()]
+    if info.get("bitrate"):
+        parts.append(f"{info['bitrate']} kb/s")
+    if info.get("sample_rate"):
+        parts.append(f"{info['sample_rate'] / 1000:g} kHz")
+    if info.get("channel_layout"):
+        parts.append(info["channel_layout"])
+    return " ".join(parts)
+
+
+async def codec_of(url: str) -> str | None:
+    """Return the audio codec of a stream, None if unknown."""
+    return (await probe(url)).get("codec")
 
 
 async def output_of(station: dict[str, Any]) -> tuple[bool, tuple[str, str, str, str | None]]:
@@ -238,11 +297,22 @@ async def stream(request: web.Request) -> web.StreamResponse:
     }
     if request.method == "HEAD":
         return web.Response(headers=headers)
-    codec = _codecs.get(station["url"], (None, 0))[0]
+    source = await probe(station["url"])
+    codec = source.get("codec")
     _LOGGER.info(
         "%s: playing to %s (%s)",
         station["name"], request.remote, f"{codec}, as is" if copy else f"{codec} → MP3 {BITRATE}",
     )  # fmt: skip
+    listener = {
+        "station": station["name"],
+        "id": sid,
+        "url": station["url"],
+        "source": {**source, "summary": describe(source)},
+        "transcoded": not copy,
+        "output": {"codec": fmt[1], "mime": fmt[2], "bitrate": None if copy else _kbps(BITRATE)},
+        "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    LISTENERS[request.remote or "?"] = listener
     args = [
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
         "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
@@ -255,6 +325,16 @@ async def stream(request: web.Request) -> web.StreamResponse:
     ]  # fmt: skip
     response = web.StreamResponse(headers=headers)
     await response.prepare(request)
+    try:
+        return await _pump(station, args, response, request.remote or "?")
+    finally:
+        # A newer request from the same player may have replaced this one.
+        if LISTENERS.get(request.remote or "?") is listener:
+            del LISTENERS[request.remote or "?"]
+
+
+async def _pump(station: dict[str, Any], args: list[str], response: web.StreamResponse, remote: str) -> web.StreamResponse:
+    """Copy ffmpeg's output to the player, restarting ffmpeg when the source drops."""
     failures = 0
     while failures < MAX_FAILURES:
         proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -267,7 +347,7 @@ async def stream(request: web.Request) -> web.StreamResponse:
                 if sent > 2_000_000:
                     failures = 0
         except (ConnectionError, asyncio.CancelledError):
-            _LOGGER.info("%s: %s stopped listening", station["name"], request.remote)
+            _LOGGER.info("%s: %s stopped listening", station["name"], remote)
             return response
         finally:
             if proc.returncode is None:
@@ -279,6 +359,19 @@ async def stream(request: web.Request) -> web.StreamResponse:
         await asyncio.sleep(min(2 * failures, 10))
     _LOGGER.error("%s: giving up after %d restarts", station["name"], MAX_FAILURES)
     return response
+
+
+def _kbps(value: str) -> int | None:
+    """Return an ffmpeg bitrate like '256k' in kbit/s."""
+    value = value.strip().lower()
+    if value.endswith("k"):
+        return _int(value[:-1])
+    return round(n / 1000) if (n := _int(value)) else None
+
+
+async def status(_request: web.Request) -> web.Response:
+    """Return what is being played to whom, keyed by the player's IP."""
+    return web.json_response({"server": STATIONS.name, "players": LISTENERS}, dumps=lambda o: json.dumps(o, ensure_ascii=False))
 
 
 # ---------------------------------------------------------------------- UPnP
@@ -455,8 +548,8 @@ class Server:
         rows = []
         for sid, st in STATIONS.stations.items():
             copy, fmt = await output_of(st)
-            codec = _codecs.get(st["url"], (None, 0))[0] or "?"
-            how = f"{codec}, bez zmian" if copy else f"{codec} → MP3 {BITRATE}"
+            source = describe(await probe(st["url"])) or "?"
+            how = f"{source}, bez zmian" if copy else f"{source} → MP3 {BITRATE}"
             rows.append(
                 f"<tr><td>{escape(st['name'])}</td><td><code>{escape(st['url'])}</code></td>"
                 f"<td>{escape(how)}</td><td><a href='/stream/{sid}.{fmt[1]}'>odtwórz</a></td>"
@@ -727,6 +820,7 @@ async def main() -> None:
 
     app = web.Application()
     app.router.add_get("/", server.index)
+    app.router.add_get("/status.json", status)
     app.router.add_get("/description.xml", server.description)
     app.router.add_get("/{svc}.xml", server.scpd)
     app.router.add_post("/ctl/{svc}", server.control)
