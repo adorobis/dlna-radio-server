@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 130
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "ASYNC", "RUF", "I"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true

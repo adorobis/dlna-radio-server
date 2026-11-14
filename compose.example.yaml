@@ -1,0 +1,33 @@
+# The server must be reachable on the LAN under its own address, so speakers
+# can find it (SSDP multicast). Use either host networking...
+services:
+  dlna-radio:
+    image: ghcr.io/adorobis/dlna-radio-server:latest
+    container_name: dlna-radio
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config:/config
+    # environment:
+    #   - DLNA_RADIO_BITRATE=256k
+
+# ...or a macvlan network with a fixed IP:
+#
+# networks:
+#   lan:
+#     driver: macvlan
+#     driver_opts:
+#       parent: eth0
+#     ipam:
+#       config:
+#         - subnet: 192.168.1.0/24
+#           gateway: 192.168.1.1
+# services:
+#   dlna-radio:
+#     image: ghcr.io/adorobis/dlna-radio-server:latest
+#     restart: unless-stopped
+#     volumes:
+#       - ./config:/config
+#     networks:
+#       lan:
+#         ipv4_address: 192.168.1.44

@@ -1,0 +1,19 @@
+# Server name shown on the speakers. The stations are in a folder under it.
+name: Radio
+stations:
+  # MP3: passed through as it is.
+  - name: Radio 357
+    id: r357
+    url: https://stream.radio357.pl/?s=app
+    logo: https://media.radio357.pl/2023/08/69019663-8230-41d2-ad39-e7efecc675ec.jpg
+  # HE-AAC: transcoded to MP3 automatically.
+  - name: Radio 357 (AAC)
+    id: r357-aac
+    url: https://stream.radio357.pl/?s=web
+  - name: Radio Nowy Świat
+    id: rns
+    url: https://stream.rcs.revma.com/ypqt40u0x1zuv
+    logo: https://nowyswiat.online/assets/images/mid.jpg
+  # Your own links, e.g. a personal patron stream:
+  # - name: My stream
+  #   url: https://...
